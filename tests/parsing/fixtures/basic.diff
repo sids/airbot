@@ -1,0 +1,12 @@
+diff --git a/src/app.ts b/src/app.ts
+index 1111111..2222222 100644
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -1,4 +1,5 @@
+ import { hello } from "./hello";
+-const message = hello();
+-console.log(message);
++const message = hello("world");
++console.log(message);
++console.log("done");
+\ No newline at end of file

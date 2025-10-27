@@ -1,0 +1,11 @@
+diff --git a/scripts/run.sh b/scripts/run.sh
+old mode 100644
+new mode 100755
+index 1234567..89abcde
+--- a/scripts/run.sh
++++ b/scripts/run.sh
+@@ -1,2 +1,2 @@
+-echo "old"
+-echo "still old"
++echo "new"
++echo "updated"
