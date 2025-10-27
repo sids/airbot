@@ -140,3 +140,6 @@ vite.config.ts.timestamp-*
 
 # Local workspace directories
 .tmp/
+
+# bd (beads) local data
+.beads/
