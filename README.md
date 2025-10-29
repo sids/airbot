@@ -28,3 +28,17 @@ bun test
 ```
 
 Use `bun run review` once the review workflow is implemented to compile and execute the agent locally against a pull request.
+
+## Running the Review CLI
+
+The review entrypoint expects a pull-request context that mirrors the GitHub Actions environment. At minimum, provide the repository slug and pull request number; supplying `GITHUB_TOKEN` allows the orchestrator to fetch PR metadata and diff files. The run stays in dry-run mode by default—set `AIRBOT_POST_REVIEW=1` to submit comments back to GitHub.
+
+```bash
+export GITHUB_REPOSITORY=owner/repo
+export PR_NUMBER=123
+export GITHUB_TOKEN=ghp_example            # optional for metadata fetches
+export ANTHROPIC_API_KEY=sk-ant-example    # required to execute agents
+export AIRBOT_POST_REVIEW=1                # optional: actually post a review
+
+bun run review
+```

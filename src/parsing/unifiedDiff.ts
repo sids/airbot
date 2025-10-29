@@ -33,7 +33,12 @@ export type DiffFile = {
   isBinary: boolean;
   isNewFile: boolean;
   isDeletedFile: boolean;
-  rename?: { from: string; to: string; rawFrom?: string; rawTo?: string };
+  rename?: {
+    from?: string;
+    to?: string;
+    rawFrom?: string;
+    rawTo?: string;
+  };
   modeChange?: { oldMode?: string; newMode?: string };
   index?: string;
 };

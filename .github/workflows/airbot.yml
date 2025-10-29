@@ -27,11 +27,10 @@ jobs:
       - name: Build
         run: bun run build
 
-      - name: Run AIRBot review (placeholder)
+      - name: Run AIRBot review
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_WORKSPACE: ${{ github.workspace }}
-        run: |
-          echo "TODO: Replace with node dist/index.js after implementation."
+        run: bun run review
