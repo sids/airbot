@@ -345,7 +345,10 @@ describe("createClaudeAgentRuntime", () => {
       },
     }) as unknown;
 
-  function createStubQuery(messages: unknown[]): any {
+  function createStubQuery(
+    messages: unknown[],
+    hooks: { onReturn?: () => void; onInterrupt?: () => void } = {},
+  ): any {
     let index = 0;
     return {
       async next() {
@@ -355,6 +358,7 @@ describe("createClaudeAgentRuntime", () => {
         return { value: undefined, done: true } as const;
       },
       async return(value?: unknown) {
+        hooks.onReturn?.();
         return { value, done: true } as const;
       },
       async throw(error: unknown) {
@@ -363,7 +367,10 @@ describe("createClaudeAgentRuntime", () => {
       [Symbol.asyncIterator]() {
         return this;
       },
-      interrupt: async () => {},
+      interrupt: async () => {
+        // Allow tests to assert whether we attempted the interrupt fallback.
+        hooks.onInterrupt?.();
+      },
       setPermissionMode: async () => {},
       setModel: async () => {},
       setMaxThinkingTokens: async () => {},
@@ -392,8 +399,18 @@ describe("createClaudeAgentRuntime", () => {
     ];
 
     let clock = 0;
+    let returnCount = 0;
+    let interruptCount = 0;
     const runtime = createClaudeAgentRuntime({
-      runQuery: () => createStubQuery(messages),
+      runQuery: () =>
+        createStubQuery(messages, {
+          onReturn: () => {
+            returnCount += 1;
+          },
+          onInterrupt: () => {
+            interruptCount += 1;
+          },
+        }),
       createServer: () => createStubServer(),
       now: () => {
         clock += 5;
@@ -412,6 +429,8 @@ describe("createClaudeAgentRuntime", () => {
     expect(result.findings).toHaveLength(1);
     expect(result.findings[0]?.body).toContain("tightening lint rules");
     expect(result.durationMs).toBeGreaterThan(0);
+    expect(returnCount).toBe(1);
+    expect(interruptCount).toBe(0);
   });
 
   test("surfaces SDK errors in the runtime response", async () => {
@@ -431,5 +450,53 @@ describe("createClaudeAgentRuntime", () => {
 
     expect(outcome.error).toContain("sdk unavailable");
     expect(outcome.findings).toHaveLength(0);
+  });
+
+  test("uses assistant JSON when result payload is empty", async () => {
+    const assistantPayload = [
+      "Initial notes.",
+      "",
+      "```json",
+      '{"findings":[{"kind":"file","path":"src/index.ts","body":"Double-check type imports."}]}',
+      "```",
+    ].join("\n");
+    const messages = [
+      {
+        type: "assistant",
+        message: {
+          content: [{ type: "text", text: assistantPayload }],
+        },
+      },
+      {
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "",
+      },
+    ];
+
+    let returnCount = 0;
+    const runtime = createClaudeAgentRuntime({
+      runQuery: () =>
+        createStubQuery(messages, {
+          onReturn: () => {
+            returnCount += 1;
+          },
+        }),
+      createServer: () => createStubServer(),
+      now: () => Date.now(),
+    });
+
+    const outcome = await runtime.run(
+      "style-reviewer",
+      baseDefinition,
+      createRuntimeContext(),
+    );
+
+    expect(outcome.error).toBeUndefined();
+    expect(outcome.warning).toBeUndefined();
+    expect(outcome.findings).toHaveLength(1);
+    expect(outcome.findings[0]?.path).toBe("src/index.ts");
+    expect(returnCount).toBe(1);
   });
 });

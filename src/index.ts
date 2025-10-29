@@ -63,6 +63,11 @@ type ReviewContext = {
   pullRequest?: PullRequestDetails;
 };
 
+type ClaudeQuery = AsyncGenerator<Record<string, unknown>, void, unknown> & {
+  return?: (value?: unknown) => Promise<IteratorResult<Record<string, unknown>, void>>;
+  interrupt?: () => Promise<void>;
+};
+
 type AgentRunResult = {
   agentId: AgentIdentifier;
   findings: Findings;
@@ -400,6 +405,8 @@ export function createClaudeAgentRuntime(
             })
           : undefined;
 
+      let stream: ClaudeQuery | undefined;
+
       try {
         const agentPrompt = buildAgentInstructionPrompt(definition, registeredTools);
         const userPrompt = buildUserPrompt(
@@ -413,7 +420,8 @@ export function createClaudeAgentRuntime(
           ? { [`airbot-tools-${agentId}`]: mcpServer }
           : undefined;
 
-        const stream = runQuery({
+        // Keep a handle to the Claude stream so we can terminate it after collecting messages.
+        stream = runQuery({
           prompt: userPrompt,
           options: {
             cwd: context.environment.workspace,
@@ -431,12 +439,12 @@ export function createClaudeAgentRuntime(
             },
             mcpServers,
           },
-        });
+        }) as ClaudeQuery;
 
         const assistantOutputs: string[] = [];
         let resultMessage: Record<string, unknown> | undefined;
 
-        for await (const message of stream as AsyncGenerator<Record<string, unknown>>) {
+        for await (const message of stream) {
           const type = typeof message.type === "string" ? message.type : undefined;
           if (type === "assistant") {
             const assistantText = collectAssistantText(message);
@@ -495,6 +503,7 @@ export function createClaudeAgentRuntime(
         if (resultText && resultText.trim().length > 0) {
           candidateTexts.push(resultText);
         }
+        // Earlier assistant chunks are useful, but prefer the freshest content first.
         candidateTexts.push(...assistantOutputs.reverse());
 
         const parsed = extractFindingsFromOutputs(candidateTexts);
@@ -518,6 +527,7 @@ export function createClaudeAgentRuntime(
           error: message,
         };
       } finally {
+        await disposeQuery(stream);
         try {
           await mcpServer?.instance.close();
         } catch {
@@ -763,6 +773,25 @@ function extractFindingsFromOutputs(
   };
 }
 
+async function disposeQuery(stream: ClaudeQuery | undefined): Promise<void> {
+  if (!stream) {
+    return;
+  }
+
+  try {
+    if (typeof stream.return === "function") {
+      await stream.return();
+      // `return()` is the graceful shutdown path; once it resolves we do not need to send an interrupt.
+      return;
+    }
+    if (typeof stream.interrupt === "function") {
+      await stream.interrupt();
+    }
+  } catch {
+    // Best-effort cleanup; errors here are non-critical.
+  }
+}
+
 function extractJsonCandidates(text: string): string[] {
   const candidates: string[] = [];
   const fenced = /```(?:json)?\s*([\s\S]*?)```/gi;
@@ -774,6 +803,7 @@ function extractJsonCandidates(text: string): string[] {
 
   const trimmed = text.trim();
   if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    // Unfenced JSON sometimes appears as the entire assistant message; treat it as a candidate too.
     candidates.push(trimmed);
   }
 
