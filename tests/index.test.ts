@@ -1,9 +1,17 @@
 import { describe, expect, test } from "bun:test";
 
-import { formatReviewPayload, runAgents } from "../src/index";
-import type { AgentRuntime } from "../src/index";
-import type { AgentMap } from "../src/agents";
+import type { Octokit } from "octokit";
+
+import {
+  createClaudeAgentRuntime,
+  createGitHubClient,
+  formatReviewPayload,
+  runAgents,
+} from "../src/index";
+import type { AgentRuntime, ReviewSubmission } from "../src/index";
+import type { AgentDefinition, AgentMap } from "../src/agents";
 import type { Finding } from "../src/types";
+import { createToolRegistry } from "../src/tools";
 import type { ToolRegistry } from "../src/tools";
 
 describe("formatReviewPayload", () => {
@@ -134,5 +142,294 @@ describe("runAgents", () => {
     expect(results).toHaveLength(3);
     expect(findings).toHaveLength(3);
     expect(findings[0]?.body).toContain("style-reviewer");
+  });
+});
+
+class FakeOctokit {
+  pullResponse: Record<string, unknown>;
+  diffResponse: unknown;
+  fileResponses: Array<Record<string, unknown>>;
+  getCalls: Array<Record<string, unknown>>;
+  requestCalls: Array<{ route: string; params: Record<string, unknown> }>;
+  paginateCalls: Array<{ fn: unknown; params: unknown }>;
+  createReviewCalls: Array<Record<string, unknown>>;
+  listFilesCalls: Array<Record<string, unknown>>;
+  rest: {
+    pulls: {
+      get: (params: Record<string, unknown>) => Promise<{ data: Record<string, unknown> }>;
+      listFiles: (params: Record<string, unknown>) => Promise<void>;
+      createReview: (params: Record<string, unknown>) => Promise<void>;
+    };
+  };
+
+  constructor() {
+    this.pullResponse = {};
+    this.diffResponse = "";
+    this.fileResponses = [];
+    this.getCalls = [];
+    this.requestCalls = [];
+    this.paginateCalls = [];
+    this.createReviewCalls = [];
+    this.listFilesCalls = [];
+    this.rest = {
+      pulls: {
+        get: async (params) => {
+          this.getCalls.push(params);
+          return { data: this.pullResponse };
+        },
+        listFiles: async (params) => {
+          this.listFilesCalls.push(params);
+        },
+        createReview: async (params) => {
+          this.createReviewCalls.push(params);
+        },
+      },
+    };
+  }
+
+  paginate = async (fn: unknown, params: unknown) => {
+    this.paginateCalls.push({ fn, params });
+    return this.fileResponses;
+  };
+
+  request = async (route: string, params: Record<string, unknown>) => {
+    this.requestCalls.push({ route, params });
+    return { data: this.diffResponse };
+  };
+}
+
+describe("createGitHubClient", () => {
+  test("wraps Octokit pull request endpoints with expected parameters", async () => {
+    const identifier = { owner: "acme", repo: "airbot", pullNumber: 7 };
+    const fakeOctokit = new FakeOctokit();
+    fakeOctokit.pullResponse = { number: 7, state: "open" };
+    fakeOctokit.diffResponse = "diff content";
+    fakeOctokit.fileResponses = [
+      { filename: "src/index.ts", additions: 5 },
+      { filename: "README.md", changes: 1 },
+    ];
+
+    const client = createGitHubClient(fakeOctokit as unknown as Octokit);
+
+    const pull = await client.getPullRequest(identifier);
+    const diff = await client.getPullRequestDiff(identifier);
+    const files = await client.listPullRequestFiles(identifier);
+
+    const review: ReviewSubmission = {
+      event: "COMMENT",
+      body: "Summary body",
+      comments: [
+        {
+          path: "src/index.ts",
+          body: "Line comment",
+          line: 12,
+          side: "RIGHT",
+        },
+      ],
+    };
+
+    await client.createReview(identifier, review);
+
+    expect(pull).toEqual(fakeOctokit.pullResponse);
+    expect(diff).toBe("diff content");
+    expect(files).toEqual(fakeOctokit.fileResponses);
+
+    expect(fakeOctokit.getCalls).toEqual([
+      {
+        owner: identifier.owner,
+        repo: identifier.repo,
+        pull_number: identifier.pullNumber,
+      },
+    ]);
+
+    expect(fakeOctokit.requestCalls).toEqual([
+      {
+        route: "GET /repos/{owner}/{repo}/pulls/{pull_number}",
+        params: {
+          owner: identifier.owner,
+          repo: identifier.repo,
+          pull_number: identifier.pullNumber,
+          headers: { accept: "application/vnd.github.v3.diff" },
+        },
+      },
+    ]);
+
+    expect(fakeOctokit.paginateCalls).toEqual([
+      {
+        fn: fakeOctokit.rest.pulls.listFiles,
+        params: {
+          owner: identifier.owner,
+          repo: identifier.repo,
+          pull_number: identifier.pullNumber,
+          per_page: 100,
+        },
+      },
+    ]);
+
+    expect(fakeOctokit.listFilesCalls).toHaveLength(0);
+
+    expect(fakeOctokit.createReviewCalls).toEqual([
+      {
+        owner: identifier.owner,
+        repo: identifier.repo,
+        pull_number: identifier.pullNumber,
+        event: review.event,
+        body: review.body,
+        comments: review.comments,
+      },
+    ]);
+  });
+
+  test("normalizes non-string diff payloads to an empty string", async () => {
+    const identifier = { owner: "acme", repo: "airbot", pullNumber: 8 };
+    const fakeOctokit = new FakeOctokit();
+    fakeOctokit.diffResponse = { data: "binary" };
+
+    const client = createGitHubClient(fakeOctokit as unknown as Octokit);
+
+    const diff = await client.getPullRequestDiff(identifier);
+
+    expect(diff).toBe("");
+  });
+});
+
+describe("createClaudeAgentRuntime", () => {
+  const baseDefinition: AgentDefinition = {
+    description: "Style reviewer",
+    prompt: "Focus on TypeScript issues and code quality gaps.",
+    tools: ["Read", "Grep"],
+    model: "sonnet",
+  };
+
+  function createRuntimeContext(): Parameters<AgentRuntime["run"]>[2] {
+    return {
+      environment: {
+        workspace: "/repo",
+        owner: "acme",
+        repo: "airbot",
+        repoSlug: "acme/airbot",
+        prNumber: 42,
+        githubToken: undefined,
+        anthropicApiKey: "test-key",
+        postReview: false,
+        isCi: false,
+      },
+      toolRegistry: createToolRegistry({ repoRoot: process.cwd() }),
+      pullRequest: {
+        data: { title: "Improve runtime" },
+        diff: "",
+        parsedDiff: {} as unknown,
+        files: [
+          {
+            filename: "src/index.ts",
+            additions: 10,
+            deletions: 2,
+            status: "modified",
+          },
+        ],
+      },
+    } as Parameters<AgentRuntime["run"]>[2];
+  }
+
+  const createStubServer = () =>
+    ({
+      type: "sdk",
+      name: "stub",
+      instance: {
+        async connect() {
+          // no-op
+        },
+        async close() {
+          // no-op
+        },
+      },
+    }) as unknown;
+
+  function createStubQuery(messages: unknown[]): any {
+    let index = 0;
+    return {
+      async next() {
+        if (index < messages.length) {
+          return { value: messages[index++], done: false } as const;
+        }
+        return { value: undefined, done: true } as const;
+      },
+      async return(value?: unknown) {
+        return { value, done: true } as const;
+      },
+      async throw(error: unknown) {
+        throw error;
+      },
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+      interrupt: async () => {},
+      setPermissionMode: async () => {},
+      setModel: async () => {},
+      setMaxThinkingTokens: async () => {},
+      supportedCommands: async () => [],
+      supportedModels: async () => [],
+      mcpServerStatus: async () => [],
+      accountInfo: async () => ({}),
+    };
+  }
+
+  test("collects findings from agent result payload", async () => {
+    const messages = [
+      {
+        type: "assistant",
+        message: {
+          content: [{ type: "text", text: "Analyzing pull request" }],
+        },
+      },
+      {
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result:
+          '{"findings":[{"kind":"summary","path":"","body":"Consider tightening lint rules."}]}',
+      },
+    ];
+
+    let clock = 0;
+    const runtime = createClaudeAgentRuntime({
+      runQuery: () => createStubQuery(messages),
+      createServer: () => createStubServer(),
+      now: () => {
+        clock += 5;
+        return clock;
+      },
+    });
+
+    const result = await runtime.run(
+      "style-reviewer",
+      baseDefinition,
+      createRuntimeContext(),
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.warning).toBeUndefined();
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]?.body).toContain("tightening lint rules");
+    expect(result.durationMs).toBeGreaterThan(0);
+  });
+
+  test("surfaces SDK errors in the runtime response", async () => {
+    const runtime = createClaudeAgentRuntime({
+      runQuery: () => {
+        throw new Error("sdk unavailable");
+      },
+      createServer: () => createStubServer(),
+      now: () => 0,
+    });
+
+    const outcome = await runtime.run(
+      "style-reviewer",
+      baseDefinition,
+      createRuntimeContext(),
+    );
+
+    expect(outcome.error).toContain("sdk unavailable");
+    expect(outcome.findings).toHaveLength(0);
   });
 });

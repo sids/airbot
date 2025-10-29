@@ -1,6 +1,9 @@
 import path from "node:path";
 
+import { query, createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { Octokit } from "octokit";
+import { z } from "zod";
 
 import type { AgentDefinition, AgentIdentifier, AgentMap } from "./agents";
 import { agents } from "./agents";
@@ -267,7 +270,7 @@ async function loadPullRequestContext(
   };
 }
 
-function createGitHubClient(octokit: Octokit): GitHubClient {
+export function createGitHubClient(octokit: Octokit): GitHubClient {
   // Wrap Octokit so orchestration can swap in a fake client during tests.
   return {
     async getPullRequest(identifier) {
@@ -311,37 +314,199 @@ function createGitHubClient(octokit: Octokit): GitHubClient {
   };
 }
 
-function createDefaultAgentRuntime(): AgentRuntime {
-  // Default runtime short-circuits until the Claude integration lands; keeping it
-  // here lets unit tests inject richer behavior without touching runReview.
+const CLAUDE_SUPPORTED_MODELS = new Set(["sonnet", "opus", "haiku", "inherit"]);
+
+const findingSchema = z
+  .object({
+    kind: z.enum(["summary", "file", "line", "range"]),
+    path: z.string(),
+    body: z.string(),
+    suggestion: z.string().optional(),
+    line: z.number().int().positive().optional(),
+    start_line: z.number().int().positive().optional(),
+    side: z.enum(["RIGHT", "LEFT"]).optional(),
+  })
+  .strict();
+
+const findingsArraySchema = z.array(findingSchema);
+
+const findingsPayloadSchema = z
+  .object({
+    findings: findingsArraySchema,
+  })
+  .strict();
+
+type ClaudeRuntimeDependencies = {
+  runQuery?: typeof query;
+  createServer?: typeof createSdkMcpServer;
+  now?: () => number;
+};
+
+type RegisteredTool = ToolRegistry[keyof ToolRegistry];
+
+export function createClaudeAgentRuntime(
+  dependencies: ClaudeRuntimeDependencies = {},
+): AgentRuntime {
+  const runQuery = dependencies.runQuery ?? query;
+  const createServer = dependencies.createServer ?? createSdkMcpServer;
+  const now = dependencies.now ?? Date.now;
+
   return {
-    async run(agentId, _definition, context) {
-      const startedAt = Date.now();
-      try {
-        if (!context.environment.anthropicApiKey) {
-          return {
-            agentId,
-            findings: [],
-            durationMs: Date.now() - startedAt,
-            warning: "ANTHROPIC_API_KEY is not set; skipping agent execution.",
-          };
-        }
+    async run(agentId, definition, context) {
+      const startedAt = now();
+      const elapsed = () => Math.max(now() - startedAt, 0);
 
-        if (!context.pullRequest) {
-          return {
-            agentId,
-            findings: [],
-            durationMs: Date.now() - startedAt,
-            warning: "Pull request context unavailable; skipping agent execution.",
-          };
-        }
-
-        // TODO: Integrate Claude Agent SDK once prompts and tooling are ready.
+      if (!context.environment.anthropicApiKey) {
         return {
           agentId,
           findings: [],
-          durationMs: Date.now() - startedAt,
-          warning: "Agent execution not yet implemented.",
+          durationMs: elapsed(),
+          warning: "ANTHROPIC_API_KEY is not set; skipping agent execution.",
+        };
+      }
+
+      if (!context.pullRequest) {
+        return {
+          agentId,
+          findings: [],
+          durationMs: elapsed(),
+          warning: "Pull request context unavailable; skipping agent execution.",
+        };
+      }
+
+      const requestedTools = definition.tools ?? [];
+      const registeredTools = requestedTools
+        .map((toolName) => context.toolRegistry[toolName])
+        .filter((tool): tool is RegisteredTool => Boolean(tool));
+      const missingToolNames = requestedTools.filter(
+        (toolName) => !context.toolRegistry[toolName],
+      );
+
+      const sdkTools = registeredTools.map((toolDefinition) =>
+        tool(
+          toolDefinition.name,
+          toolDefinition.description,
+          toolDefinition.schema as unknown as z.ZodTypeAny,
+          async (args: unknown) => callTool(toolDefinition, args),
+        ),
+      );
+
+      const mcpServer =
+        sdkTools.length > 0
+          ? createServer({
+              name: `airbot-tools-${agentId}`,
+              version: "0.1.0",
+              tools: sdkTools,
+            })
+          : undefined;
+
+      try {
+        const agentPrompt = buildAgentInstructionPrompt(definition, registeredTools);
+        const userPrompt = buildUserPrompt(
+          agentId,
+          definition,
+          context,
+          registeredTools,
+        );
+
+        const mcpServers = mcpServer
+          ? { [`airbot-tools-${agentId}`]: mcpServer }
+          : undefined;
+
+        const stream = runQuery({
+          prompt: userPrompt,
+          options: {
+            cwd: context.environment.workspace,
+            env: {
+              ...process.env,
+              ANTHROPIC_API_KEY: context.environment.anthropicApiKey,
+            },
+            agents: {
+              [agentId]: {
+                description: definition.description,
+                prompt: agentPrompt,
+                tools: registeredTools.map((tool) => tool.name),
+                model: normalizeModel(definition.model),
+              },
+            },
+            mcpServers,
+          },
+        });
+
+        const assistantOutputs: string[] = [];
+        let resultMessage: Record<string, unknown> | undefined;
+
+        for await (const message of stream as AsyncGenerator<Record<string, unknown>>) {
+          const type = typeof message.type === "string" ? message.type : undefined;
+          if (type === "assistant") {
+            const assistantText = collectAssistantText(message);
+            if (assistantText) {
+              assistantOutputs.push(assistantText);
+            }
+          } else if (type === "result") {
+            resultMessage = message;
+          }
+        }
+
+        const warnings: string[] = [];
+        if (missingToolNames.length > 0) {
+          warnings.push(
+            `Agent requested unknown tools: ${missingToolNames.join(", ")}.`,
+          );
+        }
+
+        if (!resultMessage) {
+          warnings.push("Agent runtime did not produce a result message.");
+          return {
+            agentId,
+            findings: [],
+            durationMs: elapsed(),
+            warning: warnings.join(" "),
+          };
+        }
+
+        const subtype =
+          typeof resultMessage.subtype === "string" ? resultMessage.subtype : undefined;
+        const isError = resultMessage.is_error === true;
+        const resultText =
+          typeof resultMessage.result === "string" ? resultMessage.result : undefined;
+        const permissionDenialsRaw = resultMessage.permission_denials;
+        const permissionDenials = Array.isArray(permissionDenialsRaw)
+          ? permissionDenialsRaw
+          : [];
+
+        if (permissionDenials.length > 0) {
+          warnings.push("One or more tool invocations were denied.");
+        }
+
+        if (isError || subtype !== "success") {
+          const errorText = resultText && resultText.trim().length > 0
+            ? resultText
+            : "Agent returned an error result.";
+          return {
+            agentId,
+            findings: [],
+            durationMs: elapsed(),
+            error: errorText,
+          };
+        }
+
+        const candidateTexts: string[] = [];
+        if (resultText && resultText.trim().length > 0) {
+          candidateTexts.push(resultText);
+        }
+        candidateTexts.push(...assistantOutputs.reverse());
+
+        const parsed = extractFindingsFromOutputs(candidateTexts);
+        if (parsed.warning) {
+          warnings.push(parsed.warning);
+        }
+
+        return {
+          agentId,
+          findings: parsed.findings,
+          durationMs: elapsed(),
+          warning: warnings.length > 0 ? warnings.join(" ") : undefined,
         };
       } catch (error) {
         const message =
@@ -349,12 +514,270 @@ function createDefaultAgentRuntime(): AgentRuntime {
         return {
           agentId,
           findings: [],
-          durationMs: Date.now() - startedAt,
+          durationMs: elapsed(),
           error: message,
         };
+      } finally {
+        try {
+          await mcpServer?.instance.close();
+        } catch {
+          // Ignore close failures to avoid masking earlier errors.
+        }
       }
     },
   };
+}
+
+function createDefaultAgentRuntime(): AgentRuntime {
+  return createClaudeAgentRuntime();
+}
+
+function normalizeModel(
+  model: string | undefined,
+): "sonnet" | "opus" | "haiku" | "inherit" | undefined {
+  if (!model) {
+    return undefined;
+  }
+
+  const normalized = model.toLowerCase();
+  if (CLAUDE_SUPPORTED_MODELS.has(normalized)) {
+    return normalized as "sonnet" | "opus" | "haiku" | "inherit";
+  }
+  return undefined;
+}
+
+async function callTool(
+  toolDefinition: RegisteredTool,
+  rawInput: unknown,
+): Promise<CallToolResult> {
+  try {
+    const result = await toolDefinition.invoke(rawInput as never);
+    const structured =
+      result !== null && typeof result === "object"
+        ? (result as Record<string, unknown>)
+        : { value: result };
+    const textSummary =
+      typeof result === "string" ? result : JSON.stringify(structured, null, 2);
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: textSummary,
+        },
+      ],
+      structuredContent: structured,
+    };
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : String(error ?? "Unknown tool error");
+    return {
+      content: [
+        {
+          type: "text",
+          text: message,
+        },
+      ],
+      isError: true,
+    };
+  }
+}
+
+function buildAgentInstructionPrompt(
+  definition: AgentDefinition,
+  tools: RegisteredTool[],
+): string {
+  const sections: string[] = [];
+  const trimmedPrompt = definition.prompt.trim();
+  if (trimmedPrompt.length > 0) {
+    sections.push(trimmedPrompt);
+  }
+
+  if (tools.length > 0) {
+    const toolLines = tools
+      .map((toolDefinition) => `- ${toolDefinition.name}: ${toolDefinition.description}`)
+      .join("\n");
+    sections.push(
+      "You have access to the following repository tools:\n" + toolLines,
+    );
+  } else {
+    sections.push("Repository tools are not available for this run.");
+  }
+
+  sections.push(
+    "Use the tools judiciously to inspect the current pull request changes and repository context before forming conclusions.",
+  );
+
+  sections.push(
+    "When you are ready to respond, provide JSON matching {\"findings\": [ ... ]}. Each finding must include `kind`, `path`, and `body`, and may include `line`, `start_line`, `side`, and `suggestion`.",
+  );
+  sections.push("If there are no findings, respond with {\"findings\": []}.");
+
+  return sections.join("\n\n");
+}
+
+function buildUserPrompt(
+  agentId: AgentIdentifier,
+  definition: AgentDefinition,
+  context: ReviewContext,
+  tools: RegisteredTool[],
+): string {
+  const sections: string[] = [`/agent ${agentId}`];
+
+  const { environment, pullRequest } = context;
+  const prLabel =
+    environment.prNumber !== undefined
+      ? `${environment.repoSlug}#${environment.prNumber}`
+      : environment.repoSlug;
+  sections.push(`Task: Review pull request ${prLabel} as the ${definition.description}.`);
+
+  if (pullRequest) {
+    const prData = pullRequest.data as Record<string, unknown>;
+    const prTitle =
+      prData && typeof prData.title === "string" ? (prData.title as string) : undefined;
+    if (prTitle) {
+      sections.push(`Title: ${prTitle}`);
+    }
+    const filesSummary = formatChangedFilesList(pullRequest.files);
+    sections.push(`Changed files:\n${filesSummary}`);
+  } else {
+    sections.push(
+      "Pull request metadata is unavailable; rely on repository state and tool exploration.",
+    );
+  }
+
+  if (tools.length > 0) {
+    sections.push(
+      `Use the available tools (${tools
+        .map((toolDefinition) => toolDefinition.name)
+        .join(", ")}) to gather context before finalizing findings.`,
+    );
+  }
+
+  sections.push(
+    "Respond only with JSON following the expected schema so AIRBot can parse your findings.",
+  );
+
+  return sections.join("\n\n");
+}
+
+function formatChangedFilesList(files: PullRequestFile[]): string {
+  if (files.length === 0) {
+    return "(no file metadata available)";
+  }
+
+  const limit = 20;
+  const selected = files.slice(0, limit);
+  const lines = selected.map((file) => {
+    const additions = file.additions ?? 0;
+    const deletions = file.deletions ?? 0;
+    const status = file.status ? ` (${file.status})` : "";
+    return `- ${file.filename} (+${additions}/-${deletions})${status}`;
+  });
+
+  if (files.length > limit) {
+    lines.push(`- ...and ${files.length - limit} more files`);
+  }
+
+  return lines.join("\n");
+}
+
+function collectAssistantText(message: Record<string, unknown>): string {
+  const payload = message.message;
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+
+  const content = (payload as { content?: unknown }).content;
+  if (!Array.isArray(content)) {
+    return "";
+  }
+
+  const texts: string[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== "object") {
+      continue;
+    }
+    const type = (block as { type?: unknown }).type;
+    if (type === "text" && typeof (block as { text?: unknown }).text === "string") {
+      texts.push((block as { text: string }).text);
+    }
+  }
+
+  return texts.join("\n\n").trim();
+}
+
+function extractFindingsFromOutputs(
+  outputs: string[],
+): { findings: Findings; warning?: string } {
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+
+  for (const output of outputs) {
+    if (!output) {
+      continue;
+    }
+    for (const candidate of extractJsonCandidates(output)) {
+      const trimmed = candidate.trim();
+      if (trimmed.length === 0 || seen.has(trimmed)) {
+        continue;
+      }
+      seen.add(trimmed);
+      candidates.push(trimmed);
+    }
+  }
+
+  if (candidates.length === 0) {
+    return {
+      findings: [],
+      warning: "Agent did not return structured findings JSON.",
+    };
+  }
+
+  let lastError: string | undefined;
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      const objectResult = findingsPayloadSchema.safeParse(parsed);
+      if (objectResult.success) {
+        return { findings: objectResult.data.findings };
+      }
+
+      const arrayResult = findingsArraySchema.safeParse(parsed);
+      if (arrayResult.success) {
+        return { findings: arrayResult.data };
+      }
+
+      lastError = objectResult.error?.message ?? arrayResult.error.message;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  return {
+    findings: [],
+    warning: lastError
+      ? `Unable to parse agent findings JSON (${lastError}).`
+      : "Unable to parse agent findings JSON.",
+  };
+}
+
+function extractJsonCandidates(text: string): string[] {
+  const candidates: string[] = [];
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/gi;
+
+  let match: RegExpExecArray | null;
+  while ((match = fenced.exec(text)) !== null) {
+    candidates.push(match[1] ?? "");
+  }
+
+  const trimmed = text.trim();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    candidates.push(trimmed);
+  }
+
+  return candidates;
 }
 
 export async function runAgents(
