@@ -54,4 +54,4 @@ AIRBot currently ships six Claude reviewers:
 - **Kotlin Coroutines Reviewer** – Coroutine/threading discipline for Kotlin backends (`.claude/skills/kotlin-coroutines/`).
 - **SQL DAO Reviewer** – SQL/DAL performance and schema rules (`.claude/skills/sql-dao/`).
 
-All six reviewers run by default in the current prototype; future iterations may toggle them based on the languages or directories touched in a pull request. Additional skills can be introduced by adding new `.claude/skills/<name>/SKILL.md` directories and wiring prompts in `src/agents.ts`.
+All six reviewers run by default in the current prototype; future iterations may toggle them based on the languages or directories touched in a pull request. Additional reviewers can be introduced by adding new `.claude/agents/<agent-id>.md` manifests that reference the relevant `.claude/skills/<name>/SKILL.md` rubric files.

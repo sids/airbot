@@ -1,4 +1,4 @@
-import type { Findings } from "./types";
+import type { Findings } from "./types.js";
 
 /**
  * Placeholder for finding de-duplication logic.

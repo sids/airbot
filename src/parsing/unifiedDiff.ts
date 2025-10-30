@@ -1,4 +1,4 @@
-import { normalizeGitPath, splitDiffGitHeaderPaths } from "./gitPath";
+import { normalizeGitPath, splitDiffGitHeaderPaths } from "./gitPath.js";
 
 /**
  * Types describing the structure of a parsed GitHub unified diff.
