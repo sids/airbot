@@ -3,16 +3,14 @@ import { describe, expect, test } from "bun:test";
 import type { Octokit } from "octokit";
 
 import {
-  createClaudeAgentRuntime,
   createGitHubClient,
   formatReviewPayload,
-  runAgents,
+  runClaudeOrchestrator,
 } from "../src/index";
-import type { AgentRuntime, ReviewSubmission } from "../src/index";
-import type { AgentDefinition, AgentMap } from "../src/agents";
+import type { ReviewSubmission } from "../src/index";
 import type { Finding } from "../src/types";
-import { createToolRegistry } from "../src/tools";
 import type { ToolRegistry } from "../src/tools";
+import { z } from "zod";
 
 describe("formatReviewPayload", () => {
   test("groups summary findings and prepares inline comments", () => {
@@ -78,93 +76,7 @@ describe("formatReviewPayload", () => {
   });
 });
 
-describe("runAgents", () => {
-  test("invokes the runtime for each agent and aggregates findings", async () => {
-    const emptyTools = [] as (keyof ToolRegistry)[];
-    const agentDefinitions: AgentMap = {
-      "typescript-style-reviewer": {
-        description: "style",
-        prompt: "prompt",
-        tools: emptyTools,
-        model: "fake",
-      },
-      "security-reviewer": {
-        description: "security",
-        prompt: "prompt",
-        tools: emptyTools,
-        model: "fake",
-      },
-      "test-reviewer": {
-        description: "test",
-        prompt: "prompt",
-        tools: emptyTools,
-        model: "fake",
-      },
-      "backend-architecture-reviewer": {
-        description: "backend",
-        prompt: "prompt",
-        tools: emptyTools,
-        model: "fake",
-      },
-      "kotlin-coroutines-reviewer": {
-        description: "coroutines",
-        prompt: "prompt",
-        tools: emptyTools,
-        model: "fake",
-      },
-      "sql-dao-reviewer": {
-        description: "sql",
-        prompt: "prompt",
-        tools: emptyTools,
-        model: "fake",
-      },
-    };
 
-    const runtimeCalls: string[] = [];
-    const runtime: AgentRuntime = {
-      async run(agentId) {
-        runtimeCalls.push(agentId);
-        return {
-          agentId,
-          findings: [
-            {
-              kind: "summary",
-              path: "",
-              body: `issue (${agentId})`,
-            },
-          ],
-          durationMs: 5,
-        };
-      },
-    };
-
-    const context = {
-      environment: {
-        workspace: "/workspace",
-        owner: "owner",
-        repo: "repo",
-        repoSlug: "owner/repo",
-        postReview: false,
-        isCi: false,
-      },
-      toolRegistry: {} as ToolRegistry,
-    };
-
-    const { results, findings } = await runAgents(runtime, agentDefinitions, context);
-
-    expect(runtimeCalls).toEqual([
-      "typescript-style-reviewer",
-      "security-reviewer",
-      "test-reviewer",
-      "backend-architecture-reviewer",
-      "kotlin-coroutines-reviewer",
-      "sql-dao-reviewer",
-    ]);
-    expect(results).toHaveLength(6);
-    expect(findings).toHaveLength(6);
-    expect(findings[0]?.body).toContain("typescript-style-reviewer");
-  });
-});
 
 class FakeOctokit {
   pullResponse: Record<string, unknown>;
@@ -314,48 +226,66 @@ describe("createGitHubClient", () => {
   });
 });
 
-describe("createClaudeAgentRuntime", () => {
-  const baseDefinition: AgentDefinition = {
-    description: "TypeScript style reviewer",
-    prompt: "Focus on TypeScript issues and code quality gaps.",
-    tools: ["Read", "Grep"],
-    model: "sonnet",
-  };
 
-  function createRuntimeContext(): Parameters<AgentRuntime["run"]>[2] {
-    return {
+
+describe("runClaudeOrchestrator", () => {
+  type OrchestratorContext = Parameters<typeof runClaudeOrchestrator>[0];
+  type OrchestratorDependencies = Parameters<typeof runClaudeOrchestrator>[1];
+
+  function createContext(
+    overrides: Partial<OrchestratorContext> & {
+      environment?: Partial<OrchestratorContext["environment"]>;
+    } = {},
+  ): OrchestratorContext {
+    const basePullRequest: NonNullable<OrchestratorContext["pullRequest"]> = {
+      data: { title: "Refine orchestrator" },
+      diff: "",
+      parsedDiff: [] as unknown as import("../src/parsing/unifiedDiff").ParsedDiff,
+      files: [
+        {
+          filename: "src/index.ts",
+          additions: 4,
+          deletions: 1,
+          changes: 5,
+          status: "modified",
+        } as unknown as { filename: string },
+      ],
+    };
+
+    const baseContext: OrchestratorContext = {
       environment: {
-        workspace: "/repo",
+        workspace: "/workspace",
         owner: "acme",
         repo: "airbot",
         repoSlug: "acme/airbot",
-        prNumber: 42,
-        githubToken: undefined,
-        anthropicApiKey: "test-key",
         postReview: false,
         isCi: false,
+        anthropicApiKey: "sk-test",
       },
-      toolRegistry: createToolRegistry({ repoRoot: process.cwd() }),
-      pullRequest: {
-        data: { title: "Improve runtime" },
-        diff: "",
-        parsedDiff: {} as unknown,
-        files: [
-          {
-            filename: "src/index.ts",
-            additions: 10,
-            deletions: 2,
-            status: "modified",
-          },
-        ],
-      },
-    } as Parameters<AgentRuntime["run"]>[2];
+      toolRegistry: {} as ToolRegistry,
+      pullRequest: basePullRequest,
+    };
+
+    const environment = {
+      ...baseContext.environment,
+      ...(overrides.environment ?? {}),
+    };
+
+    const toolRegistry = overrides.toolRegistry ?? baseContext.toolRegistry;
+    const pullRequest =
+      Object.prototype.hasOwnProperty.call(overrides, "pullRequest")
+        ? (overrides.pullRequest as OrchestratorContext["pullRequest"])
+        : baseContext.pullRequest;
+
+    return {
+      environment,
+      toolRegistry,
+      pullRequest,
+    };
   }
 
-  const createStubServer = () =>
-    ({
-      type: "sdk",
-      name: "stub",
+  function createStubServer() {
+    return {
       instance: {
         async connect() {
           // no-op
@@ -364,8 +294,10 @@ describe("createClaudeAgentRuntime", () => {
           // no-op
         },
       },
-    }) as unknown;
+    } as unknown;
+  }
 
+  // Minimal AsyncGenerator stub that mimics the Claude SDK stream interface for unit tests.
   function createStubQuery(
     messages: unknown[],
     hooks: { onReturn?: () => void; onInterrupt?: () => void } = {},
@@ -389,7 +321,6 @@ describe("createClaudeAgentRuntime", () => {
         return this;
       },
       interrupt: async () => {
-        // Allow tests to assert whether we attempted the interrupt fallback.
         hooks.onInterrupt?.();
       },
       setPermissionMode: async () => {},
@@ -402,12 +333,30 @@ describe("createClaudeAgentRuntime", () => {
     };
   }
 
-  test("collects findings from agent result payload", async () => {
+  test("returns a warning when ANTHROPIC_API_KEY is missing", async () => {
+    const context = createContext({ environment: { anthropicApiKey: undefined } });
+
+    const result = await runClaudeOrchestrator(context);
+
+    expect(result.warning).toContain("ANTHROPIC_API_KEY");
+    expect(result.findings).toHaveLength(0);
+  });
+
+  test("returns a warning when pull request context is missing", async () => {
+    const context = createContext({ pullRequest: undefined });
+
+    const result = await runClaudeOrchestrator(context);
+
+    expect(result.warning).toContain("Pull request context unavailable");
+    expect(result.findings).toHaveLength(0);
+  });
+
+  test("collects findings from the result payload", async () => {
     const messages = [
       {
         type: "assistant",
         message: {
-          content: [{ type: "text", text: "Analyzing pull request" }],
+          content: [{ type: "text", text: "Reviewing pull request" }],
         },
       },
       {
@@ -415,14 +364,25 @@ describe("createClaudeAgentRuntime", () => {
         subtype: "success",
         is_error: false,
         result:
-          '{"findings":[{"kind":"summary","path":"","body":"Consider tightening lint rules."}]}',
+          '{"findings":[{"kind":"summary","path":"","body":"Ready to ship."}]}',
       },
     ];
 
     let clock = 0;
     let returnCount = 0;
     let interruptCount = 0;
-    const runtime = createClaudeAgentRuntime({
+    let serverCreated = 0;
+
+    const toolRegistry: ToolRegistry = {
+      Read: {
+        name: "Read",
+        description: "Read file contents",
+        schema: z.object({ path: z.string() }),
+        invoke: async () => "ok",
+      },
+    } as unknown as ToolRegistry;
+
+    const dependencies: OrchestratorDependencies = {
       runQuery: () =>
         createStubQuery(messages, {
           onReturn: () => {
@@ -432,55 +392,39 @@ describe("createClaudeAgentRuntime", () => {
             interruptCount += 1;
           },
         }),
-      createServer: () => createStubServer(),
+      createServer: () => {
+        serverCreated += 1;
+        return createStubServer();
+      },
       now: () => {
         clock += 5;
         return clock;
       },
-    });
+    };
 
-    const result = await runtime.run(
-      "typescript-style-reviewer",
-      baseDefinition,
-      createRuntimeContext(),
-    );
+    const context = createContext({ toolRegistry });
+
+    const result = await runClaudeOrchestrator(context, dependencies);
 
     expect(result.error).toBeUndefined();
     expect(result.warning).toBeUndefined();
     expect(result.findings).toHaveLength(1);
-    expect(result.findings[0]?.body).toContain("tightening lint rules");
+    expect(result.findings[0]?.body).toContain("Ready to ship");
     expect(result.durationMs).toBeGreaterThan(0);
     expect(returnCount).toBe(1);
     expect(interruptCount).toBe(0);
+    expect(serverCreated).toBe(1);
   });
 
-  test("surfaces SDK errors in the runtime response", async () => {
-    const runtime = createClaudeAgentRuntime({
-      runQuery: () => {
-        throw new Error("sdk unavailable");
-      },
-      createServer: () => createStubServer(),
-      now: () => 0,
-    });
-
-    const outcome = await runtime.run(
-      "typescript-style-reviewer",
-      baseDefinition,
-      createRuntimeContext(),
-    );
-
-    expect(outcome.error).toContain("sdk unavailable");
-    expect(outcome.findings).toHaveLength(0);
-  });
-
-  test("uses assistant JSON when result payload is empty", async () => {
+  test("falls back to assistant JSON when result text is empty", async () => {
     const assistantPayload = [
       "Initial notes.",
       "",
       "```json",
-      '{"findings":[{"kind":"file","path":"src/index.ts","body":"Double-check type imports."}]}',
+      '{"findings":[{"kind":"file","path":"src/index.ts","body":"Double-check imports."}]}',
       "```",
     ].join("\n");
+
     const messages = [
       {
         type: "assistant",
@@ -497,7 +441,8 @@ describe("createClaudeAgentRuntime", () => {
     ];
 
     let returnCount = 0;
-    const runtime = createClaudeAgentRuntime({
+
+    const dependencies: OrchestratorDependencies = {
       runQuery: () =>
         createStubQuery(messages, {
           onReturn: () => {
@@ -506,18 +451,15 @@ describe("createClaudeAgentRuntime", () => {
         }),
       createServer: () => createStubServer(),
       now: () => Date.now(),
-    });
+    };
 
-    const outcome = await runtime.run(
-      "typescript-style-reviewer",
-      baseDefinition,
-      createRuntimeContext(),
-    );
+    const context = createContext();
 
-    expect(outcome.error).toBeUndefined();
-    expect(outcome.warning).toBeUndefined();
-    expect(outcome.findings).toHaveLength(1);
-    expect(outcome.findings[0]?.path).toBe("src/index.ts");
+    const result = await runClaudeOrchestrator(context, dependencies);
+
+    expect(result.error).toBeUndefined();
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]?.path).toBe("src/index.ts");
     expect(returnCount).toBe(1);
   });
 });

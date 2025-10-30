@@ -1,8 +1,9 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `src/` — TypeScript source for AIRBot. Core orchestration lives in `src/index.ts`; domain helpers reside in `src/agents.ts`, `src/tools.ts`, `src/dedupe.ts`, and `src/parsing/`.
+- `src/` — TypeScript source for AIRBot. Core orchestration lives in `src/index.ts`; domain helpers reside in `src/tools.ts`, `src/dedupe.ts`, and `src/parsing/`.
 - `tests/` — Bun test suites; mirror source structure (e.g., `tests/parsing/*.test.ts`) and keep fixtures alongside the specs.
+- `.claude/agents/` — Declarative reviewer manifests (one per agent). Each frontmatter block specifies name, description, tools, and model.
 - `.claude/skills/` — Each skill lives in its own directory (e.g., `.claude/skills/security-checklist/`) with a `SKILL.md` frontmatter file (must declare `name`, `description`, `license`) plus any supporting docs or scripts.
 - `.github/workflows/airbot.yml` — CI entry point; ensure new automation steps stay Bun-first.
 - `CLAUDE.md` & `README.md` — Contributor-facing rubric and overview; update when behavior or scope shifts.
@@ -15,7 +16,7 @@
 - **Kotlin Coroutines Reviewer** — Coroutine/threading guardrails for Kotlin backends (`.claude/skills/kotlin-coroutines/`).
 - **SQL DAO Reviewer** — SQL/DAL performance and schema practices (`.claude/skills/sql-dao/`).
 
-The current prototype invokes all six reviewers on every run. Add or disable agents by editing `src/agents.ts`; each reviewer should cite a skill directory and corresponding rubric entries in `CLAUDE.md`.
+The current prototype invokes all six reviewers on every run. Add or disable agents by editing the `.claude/agents/` manifests; each reviewer should cite a skill directory and corresponding rubric entries in `CLAUDE.md`.
 
 ## Build, Test, and Development Commands
 - `bun install` — Resolve dependencies declared in `package.json`. Run after any dependency change.

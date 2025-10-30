@@ -1,18 +1,15 @@
 import path from "node:path";
 
 import { query, createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { Octokit } from "octokit";
 import { z } from "zod";
 
-import type { AgentDefinition, AgentIdentifier, AgentMap } from "./agents";
-import { agents } from "./agents";
-import { dedupeFindings } from "./dedupe";
-import type { ParsedDiff } from "./parsing/unifiedDiff";
-import { parseUnifiedDiff } from "./parsing/unifiedDiff";
-import { createToolRegistry } from "./tools";
-import type { ToolRegistry } from "./tools";
-import type { Findings } from "./types";
+import { dedupeFindings } from "./dedupe.js";
+import type { ParsedDiff } from "./parsing/unifiedDiff.js";
+import { parseUnifiedDiff } from "./parsing/unifiedDiff.js";
+import { createToolRegistry } from "./tools.js";
+import type { ToolRegistry } from "./tools.js";
+import type { Findings } from "./types.js";
 
 type ReviewEnvironment = {
   workspace: string;
@@ -68,25 +65,19 @@ type ClaudeQuery = AsyncGenerator<Record<string, unknown>, void, unknown> & {
   interrupt?: () => Promise<void>;
 };
 
-type AgentRunResult = {
-  agentId: AgentIdentifier;
+type OrchestratorRunResult = {
   findings: Findings;
   durationMs: number;
   warning?: string;
   error?: string;
-};
-
-export type AgentRuntime = {
-  run(
-    agentId: AgentIdentifier,
-    definition: AgentDefinition,
-    context: ReviewContext,
-  ): Promise<AgentRunResult>;
+  assistantOutputs: string[];
 };
 
 export type RunReviewDependencies = {
   githubClient?: GitHubClient;
-  agentRuntime?: AgentRuntime;
+  runQuery?: typeof query;
+  createServer?: typeof createSdkMcpServer;
+  now?: () => number;
 };
 
 type ReviewCommentPayload = {
@@ -319,8 +310,6 @@ export function createGitHubClient(octokit: Octokit): GitHubClient {
   };
 }
 
-const CLAUDE_SUPPORTED_MODELS = new Set(["sonnet", "opus", "haiku", "inherit"]);
-
 const findingSchema = z
   .object({
     kind: z.enum(["summary", "file", "line", "range"]),
@@ -341,7 +330,7 @@ const findingsPayloadSchema = z
   })
   .strict();
 
-type ClaudeRuntimeDependencies = {
+type ClaudeOrchestratorDependencies = {
   runQuery?: typeof query;
   createServer?: typeof createSdkMcpServer;
   now?: () => number;
@@ -349,212 +338,179 @@ type ClaudeRuntimeDependencies = {
 
 type RegisteredTool = ToolRegistry[keyof ToolRegistry];
 
-export function createClaudeAgentRuntime(
-  dependencies: ClaudeRuntimeDependencies = {},
-): AgentRuntime {
+type CallToolResult = {
+  content: Array<{
+    type: "text";
+    text: string;
+  }>;
+  structuredContent?: Record<string, unknown>;
+  isError?: boolean;
+};
+
+// Single entrypoint for delegating review work to Claude; it spins up repo tools once,
+// lets Claude discover filesystem agents, and collects whatever findings the session returns.
+export async function runClaudeOrchestrator(
+  context: ReviewContext,
+  dependencies: ClaudeOrchestratorDependencies = {},
+): Promise<OrchestratorRunResult> {
   const runQuery = dependencies.runQuery ?? query;
   const createServer = dependencies.createServer ?? createSdkMcpServer;
   const now = dependencies.now ?? Date.now;
 
-  return {
-    async run(agentId, definition, context) {
-      const startedAt = now();
-      const elapsed = () => Math.max(now() - startedAt, 0);
+  const startedAt = now();
+  const elapsed = () => Math.max(now() - startedAt, 0);
 
-      if (!context.environment.anthropicApiKey) {
-        return {
-          agentId,
-          findings: [],
-          durationMs: elapsed(),
-          warning: "ANTHROPIC_API_KEY is not set; skipping agent execution.",
-        };
-      }
-
-      if (!context.pullRequest) {
-        return {
-          agentId,
-          findings: [],
-          durationMs: elapsed(),
-          warning: "Pull request context unavailable; skipping agent execution.",
-        };
-      }
-
-      const requestedTools = definition.tools ?? [];
-      const registeredTools = requestedTools
-        .map((toolName) => context.toolRegistry[toolName])
-        .filter((tool): tool is RegisteredTool => Boolean(tool));
-      const missingToolNames = requestedTools.filter(
-        (toolName) => !context.toolRegistry[toolName],
-      );
-
-      const sdkTools = registeredTools.map((toolDefinition) =>
-        tool(
-          toolDefinition.name,
-          toolDefinition.description,
-          toolDefinition.schema as unknown as z.ZodTypeAny,
-          async (args: unknown) => callTool(toolDefinition, args),
-        ),
-      );
-
-      const mcpServer =
-        sdkTools.length > 0
-          ? createServer({
-              name: `airbot-tools-${agentId}`,
-              version: "0.1.0",
-              tools: sdkTools,
-            })
-          : undefined;
-
-      let stream: ClaudeQuery | undefined;
-
-      try {
-        const agentPrompt = buildAgentInstructionPrompt(definition, registeredTools);
-        const userPrompt = buildUserPrompt(
-          agentId,
-          definition,
-          context,
-          registeredTools,
-        );
-
-        const mcpServers = mcpServer
-          ? { [`airbot-tools-${agentId}`]: mcpServer }
-          : undefined;
-
-        // Keep a handle to the Claude stream so we can terminate it after collecting messages.
-        stream = runQuery({
-          prompt: userPrompt,
-          options: {
-            cwd: context.environment.workspace,
-            env: {
-              ...process.env,
-              ANTHROPIC_API_KEY: context.environment.anthropicApiKey,
-            },
-            agents: {
-              [agentId]: {
-                description: definition.description,
-                prompt: agentPrompt,
-                tools: registeredTools.map((tool) => tool.name),
-                model: normalizeModel(definition.model),
-              },
-            },
-            mcpServers,
-          },
-        }) as ClaudeQuery;
-
-        const assistantOutputs: string[] = [];
-        let resultMessage: Record<string, unknown> | undefined;
-
-        for await (const message of stream) {
-          const type = typeof message.type === "string" ? message.type : undefined;
-          if (type === "assistant") {
-            const assistantText = collectAssistantText(message);
-            if (assistantText) {
-              assistantOutputs.push(assistantText);
-            }
-          } else if (type === "result") {
-            resultMessage = message;
-          }
-        }
-
-        const warnings: string[] = [];
-        if (missingToolNames.length > 0) {
-          warnings.push(
-            `Agent requested unknown tools: ${missingToolNames.join(", ")}.`,
-          );
-        }
-
-        if (!resultMessage) {
-          warnings.push("Agent runtime did not produce a result message.");
-          return {
-            agentId,
-            findings: [],
-            durationMs: elapsed(),
-            warning: warnings.join(" "),
-          };
-        }
-
-        const subtype =
-          typeof resultMessage.subtype === "string" ? resultMessage.subtype : undefined;
-        const isError = resultMessage.is_error === true;
-        const resultText =
-          typeof resultMessage.result === "string" ? resultMessage.result : undefined;
-        const permissionDenialsRaw = resultMessage.permission_denials;
-        const permissionDenials = Array.isArray(permissionDenialsRaw)
-          ? permissionDenialsRaw
-          : [];
-
-        if (permissionDenials.length > 0) {
-          warnings.push("One or more tool invocations were denied.");
-        }
-
-        if (isError || subtype !== "success") {
-          const errorText = resultText && resultText.trim().length > 0
-            ? resultText
-            : "Agent returned an error result.";
-          return {
-            agentId,
-            findings: [],
-            durationMs: elapsed(),
-            error: errorText,
-          };
-        }
-
-        const candidateTexts: string[] = [];
-        if (resultText && resultText.trim().length > 0) {
-          candidateTexts.push(resultText);
-        }
-        // Earlier assistant chunks are useful, but prefer the freshest content first.
-        candidateTexts.push(...assistantOutputs.reverse());
-
-        const parsed = extractFindingsFromOutputs(candidateTexts);
-        if (parsed.warning) {
-          warnings.push(parsed.warning);
-        }
-
-        return {
-          agentId,
-          findings: parsed.findings,
-          durationMs: elapsed(),
-          warning: warnings.length > 0 ? warnings.join(" ") : undefined,
-        };
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Unknown agent execution error";
-        return {
-          agentId,
-          findings: [],
-          durationMs: elapsed(),
-          error: message,
-        };
-      } finally {
-        await disposeQuery(stream);
-        try {
-          await mcpServer?.instance.close();
-        } catch {
-          // Ignore close failures to avoid masking earlier errors.
-        }
-      }
-    },
-  };
-}
-
-function createDefaultAgentRuntime(): AgentRuntime {
-  return createClaudeAgentRuntime();
-}
-
-function normalizeModel(
-  model: string | undefined,
-): "sonnet" | "opus" | "haiku" | "inherit" | undefined {
-  if (!model) {
-    return undefined;
+  if (!context.environment.anthropicApiKey) {
+    return {
+      findings: [],
+      durationMs: elapsed(),
+      warning: "ANTHROPIC_API_KEY is not set; skipping Claude orchestration.",
+      assistantOutputs: [],
+    };
   }
 
-  const normalized = model.toLowerCase();
-  if (CLAUDE_SUPPORTED_MODELS.has(normalized)) {
-    return normalized as "sonnet" | "opus" | "haiku" | "inherit";
+  if (!context.pullRequest) {
+    return {
+      findings: [],
+      durationMs: elapsed(),
+      warning: "Pull request context unavailable; skipping Claude orchestration.",
+      assistantOutputs: [],
+    };
   }
-  return undefined;
+
+  const registeredTools = Object.values(
+    context.toolRegistry,
+  ) as RegisteredTool[];
+  const sdkTools = registeredTools.map((toolDefinition) =>
+    tool(
+      toolDefinition.name,
+      toolDefinition.description,
+      toolDefinition.schema.shape,
+      async (args: unknown) => callTool(toolDefinition, args),
+    ),
+  );
+
+  const mcpServer =
+    sdkTools.length > 0
+      ? createServer({
+          name: "airbot-tools",
+          version: "0.2.0",
+          tools: sdkTools,
+        })
+      : undefined;
+
+  let stream: ClaudeQuery | undefined;
+
+  try {
+    const userPrompt = buildOrchestratorPrompt(context, registeredTools);
+
+    const mcpServers = mcpServer ? { "airbot-tools": mcpServer } : undefined;
+
+    stream = runQuery({
+      prompt: userPrompt,
+      options: {
+        cwd: context.environment.workspace,
+        env: {
+          ...process.env,
+          ANTHROPIC_API_KEY: context.environment.anthropicApiKey,
+        },
+        mcpServers,
+        settingSources: ["project"],
+      },
+    }) as ClaudeQuery;
+
+    const assistantOutputs: string[] = [];
+    let resultMessage: Record<string, unknown> | undefined;
+
+    for await (const message of stream) {
+      const type = typeof message.type === "string" ? message.type : undefined;
+      if (type === "assistant") {
+        const assistantText = collectAssistantText(message);
+        if (assistantText) {
+          assistantOutputs.push(assistantText);
+        }
+      } else if (type === "result") {
+        resultMessage = message;
+      }
+    }
+
+    const warnings: string[] = [];
+
+    if (!resultMessage) {
+      warnings.push("Claude orchestration did not produce a result message.");
+      return {
+        findings: [],
+        durationMs: elapsed(),
+        warning: warnings.join(" "),
+        assistantOutputs,
+      };
+    }
+
+    const subtype =
+      typeof resultMessage.subtype === "string" ? resultMessage.subtype : undefined;
+    const isError = resultMessage.is_error === true;
+    const resultText =
+      typeof resultMessage.result === "string" ? resultMessage.result : undefined;
+    const permissionDenialsRaw = resultMessage.permission_denials;
+    const permissionDenials = Array.isArray(permissionDenialsRaw)
+      ? permissionDenialsRaw
+      : [];
+
+    if (permissionDenials.length > 0) {
+      warnings.push("One or more tool invocations were denied.");
+    }
+
+    if (isError || subtype !== "success") {
+      const errorText =
+        resultText && resultText.trim().length > 0
+          ? resultText
+          : "Claude orchestrator returned an error result.";
+      return {
+        findings: [],
+        durationMs: elapsed(),
+        error: errorText,
+        assistantOutputs,
+      };
+    }
+
+    const candidateTexts: string[] = [];
+    if (resultText && resultText.trim().length > 0) {
+      candidateTexts.push(resultText);
+    }
+    // Earlier assistant messages often contain JSON fallbacks; push them in reverse
+    // order so the freshest snippet is parsed first if the result payload is empty.
+    candidateTexts.push(...assistantOutputs.slice().reverse());
+
+    const parsed = extractFindingsFromOutputs(candidateTexts);
+    if (parsed.warning) {
+      warnings.push(parsed.warning);
+    }
+
+    return {
+      findings: parsed.findings,
+      durationMs: elapsed(),
+      warning: warnings.length > 0 ? warnings.join(" ") : undefined,
+      assistantOutputs,
+    };
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Unknown Claude orchestration error";
+    return {
+      findings: [],
+      durationMs: elapsed(),
+      error: message,
+      assistantOutputs: [],
+    };
+  } finally {
+    await disposeQuery(stream);
+    try {
+      await mcpServer?.instance.close();
+    } catch {
+      // Ignore close failures to avoid masking earlier errors.
+    }
+  }
 }
+
 
 async function callTool(
   toolDefinition: RegisteredTool,
@@ -593,53 +549,32 @@ async function callTool(
   }
 }
 
-function buildAgentInstructionPrompt(
-  definition: AgentDefinition,
-  tools: RegisteredTool[],
-): string {
-  const sections: string[] = [];
-  const trimmedPrompt = definition.prompt.trim();
-  if (trimmedPrompt.length > 0) {
-    sections.push(trimmedPrompt);
-  }
 
-  if (tools.length > 0) {
-    const toolLines = tools
-      .map((toolDefinition) => `- ${toolDefinition.name}: ${toolDefinition.description}`)
-      .join("\n");
-    sections.push(
-      "You have access to the following repository tools:\n" + toolLines,
-    );
-  } else {
-    sections.push("Repository tools are not available for this run.");
-  }
-
-  sections.push(
-    "Use the tools judiciously to inspect the current pull request changes and repository context before forming conclusions.",
-  );
-
-  sections.push(
-    "When you are ready to respond, provide JSON matching {\"findings\": [ ... ]}. Each finding must include `kind`, `path`, and `body`, and may include `line`, `start_line`, `side`, and `suggestion`.",
-  );
-  sections.push("If there are no findings, respond with {\"findings\": []}.");
-
-  return sections.join("\n\n");
-}
-
-function buildUserPrompt(
-  agentId: AgentIdentifier,
-  definition: AgentDefinition,
+// Prompt structure nudges Claude to issue /agent commands and keeps the response schema stable.
+function buildOrchestratorPrompt(
   context: ReviewContext,
   tools: RegisteredTool[],
 ): string {
-  const sections: string[] = [`/agent ${agentId}`];
+  const sections: string[] = [];
 
   const { environment, pullRequest } = context;
   const prLabel =
     environment.prNumber !== undefined
       ? `${environment.repoSlug}#${environment.prNumber}`
       : environment.repoSlug;
-  sections.push(`Task: Review pull request ${prLabel} as the ${definition.description}.`);
+
+  sections.push(
+    "You are AIRBot's autonomous review orchestrator. Coordinate the declarative subagents stored in .claude/agents/ to assess the current pull request.",
+  );
+
+  sections.push(
+    "Use `/agent <name>` commands to load the subagents you deem relevant. Allow each subagent to consult CLAUDE.md and its linked rubric directory before emitting findings.",
+  );
+
+  const metadataNotice = pullRequest
+    ? ""
+    : " Pull request metadata is limited; rely on repository exploration.";
+  sections.push(`Target pull request: ${prLabel}.${metadataNotice}`);
 
   if (pullRequest) {
     const prData = pullRequest.data as Record<string, unknown>;
@@ -650,26 +585,32 @@ function buildUserPrompt(
     }
     const filesSummary = formatChangedFilesList(pullRequest.files);
     sections.push(`Changed files:\n${filesSummary}`);
-  } else {
-    sections.push(
-      "Pull request metadata is unavailable; rely on repository state and tool exploration.",
-    );
   }
 
   if (tools.length > 0) {
+    const toolLines = tools
+      .map((toolDefinition) => `- ${toolDefinition.name}: ${toolDefinition.description}`)
+      .join("\n");
     sections.push(
-      `Use the available tools (${tools
-        .map((toolDefinition) => toolDefinition.name)
-        .join(", ")}) to gather context before finalizing findings.`,
+      "Repository tools available during this session:\n" + toolLines,
     );
+  } else {
+    sections.push("Repository tools are not available for this run.");
   }
 
   sections.push(
-    "Respond only with JSON following the expected schema so AIRBot can parse your findings.",
+    "Let subagents run as needed, summarize or deduplicate overlapping findings, and only surface actionable insights.",
+  );
+
+  sections.push(
+    'Respond with JSON matching {"findings": [...]}.' +
+      " Each finding must include kind, path, and body, and may include line, start_line, side, and suggestion." +
+      ' Return {"findings": []} when there are no issues.',
   );
 
   return sections.join("\n\n");
 }
+
 
 function formatChangedFilesList(files: PullRequestFile[]): string {
   if (files.length === 0) {
@@ -740,7 +681,7 @@ function extractFindingsFromOutputs(
   if (candidates.length === 0) {
     return {
       findings: [],
-      warning: "Agent did not return structured findings JSON.",
+      warning: "Claude orchestrator did not return structured findings JSON.",
     };
   }
 
@@ -768,8 +709,8 @@ function extractFindingsFromOutputs(
   return {
     findings: [],
     warning: lastError
-      ? `Unable to parse agent findings JSON (${lastError}).`
-      : "Unable to parse agent findings JSON.",
+      ? `Unable to parse findings JSON (${lastError}).`
+      : "Unable to parse findings JSON.",
   };
 }
 
@@ -810,26 +751,6 @@ function extractJsonCandidates(text: string): string[] {
   return candidates;
 }
 
-export async function runAgents(
-  agentRuntime: AgentRuntime,
-  agentMap: AgentMap,
-  context: ReviewContext,
-): Promise<{ results: AgentRunResult[]; findings: Findings }> {
-  const results: AgentRunResult[] = [];
-  const findings: Findings = [];
-
-  for (const [agentId, definition] of Object.entries(agentMap) as [
-    AgentIdentifier,
-    AgentDefinition,
-  ][]) {
-    const result = await agentRuntime.run(agentId, definition, context);
-    results.push(result);
-    findings.push(...result.findings);
-  }
-
-  // Return both raw results (for logging) and flattened findings (for dedupe).
-  return { results, findings };
-}
 
 export async function runReview(
   dependencies: RunReviewDependencies = {},
@@ -852,11 +773,6 @@ export async function runReview(
       ? createGitHubClient(new Octokit({ auth: environment.githubToken }))
       : undefined);
 
-  // Let callers supply a preconfigured runtime (e.g., mocked SDK) while keeping
-  // the default path lightweight during scaffolding.
-  const agentRuntime =
-    dependencies.agentRuntime ?? createDefaultAgentRuntime();
-
   if (githubClient && environment.prNumber !== undefined) {
     try {
       context.pullRequest = await loadPullRequestContext(githubClient, environment);
@@ -874,22 +790,25 @@ export async function runReview(
     );
   }
 
-  const { results: agentResults, findings: collectedFindings } =
-    await runAgents(agentRuntime, agents, context);
+  const orchestratorDependencies: ClaudeOrchestratorDependencies = {
+    runQuery: dependencies.runQuery,
+    createServer: dependencies.createServer,
+    now: dependencies.now,
+  };
 
-  for (const result of agentResults) {
-    if (result.error) {
-      console.error(`[airbot] Agent ${result.agentId} failed: ${result.error}`);
-    } else if (result.warning) {
-      console.warn(
-        `[airbot] Agent ${result.agentId} warning: ${result.warning}`,
-      );
-    } else {
-      console.log(
-        `[airbot] Agent ${result.agentId} completed with ${result.findings.length} findings.`,
-      );
-    }
+  const orchestratorResult = await runClaudeOrchestrator(context, orchestratorDependencies);
+
+  if (orchestratorResult.error) {
+    console.error(`[airbot] Claude orchestration failed: ${orchestratorResult.error}`);
+  } else if (orchestratorResult.warning) {
+    console.warn(`[airbot] Claude orchestration warning: ${orchestratorResult.warning}`);
+  } else {
+    console.log(
+      `[airbot] Claude orchestration completed with ${orchestratorResult.findings.length} findings.`,
+    );
   }
+
+  const collectedFindings = orchestratorResult.findings;
 
   const dedupedFindings = dedupeFindings(collectedFindings);
   const review = formatReviewPayload(dedupedFindings);
@@ -907,13 +826,13 @@ export async function runReview(
           prNumber: environment.prNumber,
           findings: dedupedFindings,
           review,
-          agents: agentResults.map((result) => ({
-            agentId: result.agentId,
-            durationMs: result.durationMs,
-            warning: result.warning,
-            error: result.error,
-            findingCount: result.findings.length,
-          })),
+          session: {
+            durationMs: orchestratorResult.durationMs,
+            warning: orchestratorResult.warning,
+            error: orchestratorResult.error,
+            assistantOutputs: orchestratorResult.assistantOutputs,
+            findingCount: orchestratorResult.findings.length,
+          },
         },
         null,
         2,

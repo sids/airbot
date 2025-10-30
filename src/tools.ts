@@ -52,7 +52,7 @@ export type GrepResult = {
   truncated: boolean;
 };
 
-type ToolDefinition<TSchema extends z.ZodTypeAny, TResult> = {
+type ToolDefinition<TSchema extends z.ZodObject<z.ZodRawShape>, TResult> = {
   name: ToolName;
   description: string;
   schema: TSchema;
@@ -151,7 +151,7 @@ async function assertIsReadableFile(absolutePath: string): Promise<void> {
   }
 }
 
-function defineTool<TSchema extends z.ZodTypeAny, TResult>(
+function defineTool<TSchema extends z.ZodObject<z.ZodRawShape>, TResult>(
   config: {
     name: ToolName;
     description: string;
