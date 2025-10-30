@@ -82,7 +82,7 @@ describe("runAgents", () => {
   test("invokes the runtime for each agent and aggregates findings", async () => {
     const emptyTools = [] as (keyof ToolRegistry)[];
     const agentDefinitions: AgentMap = {
-      "style-reviewer": {
+      "typescript-style-reviewer": {
         description: "style",
         prompt: "prompt",
         tools: emptyTools,
@@ -96,6 +96,24 @@ describe("runAgents", () => {
       },
       "test-reviewer": {
         description: "test",
+        prompt: "prompt",
+        tools: emptyTools,
+        model: "fake",
+      },
+      "backend-architecture-reviewer": {
+        description: "backend",
+        prompt: "prompt",
+        tools: emptyTools,
+        model: "fake",
+      },
+      "kotlin-coroutines-reviewer": {
+        description: "coroutines",
+        prompt: "prompt",
+        tools: emptyTools,
+        model: "fake",
+      },
+      "sql-dao-reviewer": {
+        description: "sql",
         prompt: "prompt",
         tools: emptyTools,
         model: "fake",
@@ -135,13 +153,16 @@ describe("runAgents", () => {
     const { results, findings } = await runAgents(runtime, agentDefinitions, context);
 
     expect(runtimeCalls).toEqual([
-      "style-reviewer",
+      "typescript-style-reviewer",
       "security-reviewer",
       "test-reviewer",
+      "backend-architecture-reviewer",
+      "kotlin-coroutines-reviewer",
+      "sql-dao-reviewer",
     ]);
-    expect(results).toHaveLength(3);
-    expect(findings).toHaveLength(3);
-    expect(findings[0]?.body).toContain("style-reviewer");
+    expect(results).toHaveLength(6);
+    expect(findings).toHaveLength(6);
+    expect(findings[0]?.body).toContain("typescript-style-reviewer");
   });
 });
 
@@ -295,7 +316,7 @@ describe("createGitHubClient", () => {
 
 describe("createClaudeAgentRuntime", () => {
   const baseDefinition: AgentDefinition = {
-    description: "Style reviewer",
+    description: "TypeScript style reviewer",
     prompt: "Focus on TypeScript issues and code quality gaps.",
     tools: ["Read", "Grep"],
     model: "sonnet",
@@ -419,7 +440,7 @@ describe("createClaudeAgentRuntime", () => {
     });
 
     const result = await runtime.run(
-      "style-reviewer",
+      "typescript-style-reviewer",
       baseDefinition,
       createRuntimeContext(),
     );
@@ -443,7 +464,7 @@ describe("createClaudeAgentRuntime", () => {
     });
 
     const outcome = await runtime.run(
-      "style-reviewer",
+      "typescript-style-reviewer",
       baseDefinition,
       createRuntimeContext(),
     );
@@ -488,7 +509,7 @@ describe("createClaudeAgentRuntime", () => {
     });
 
     const outcome = await runtime.run(
-      "style-reviewer",
+      "typescript-style-reviewer",
       baseDefinition,
       createRuntimeContext(),
     );

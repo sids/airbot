@@ -18,6 +18,7 @@ AIRBot (short for **AI Review Bot**) aims to build an automated pull-request rev
 
 ## Current Status
 - Bun-powered TypeScript scaffold with placeholder modules (`src/`), tests (`tests/`), skills (`.claude/skills/`), and a GitHub Actions workflow.
+- Reviewer roster includes TypeScript style, security, and test coverage agents, plus Kotlin-oriented backend reviewers (architecture, coroutines, SQL DAO) sourced from `.claude/skills/`.
 - No runtime implementation yet—core logic, prompts, and tooling will be filled in next iterations.
 
 ## Getting Started
@@ -42,3 +43,15 @@ export AIRBOT_POST_REVIEW=1                # optional: actually post a review
 
 bun run review
 ```
+
+### Reviewer Roster & Triggering
+
+AIRBot currently ships six Claude reviewers:
+- **TypeScript Style Reviewer** – TypeScript conventions, null safety, module organization (`.claude/skills/ts-style/`).
+- **Security Reviewer** – Node/TS security guardrails (`.claude/skills/security-checklist/`).
+- **Test Reviewer** – Coverage expectations for Bun-based projects (`.claude/skills/test-coverage/`).
+- **Backend Architecture Reviewer** – Kotlin service layering, packaging, and DI guidance (`.claude/skills/backend-code-organisation/`).
+- **Kotlin Coroutines Reviewer** – Coroutine/threading discipline for Kotlin backends (`.claude/skills/kotlin-coroutines/`).
+- **SQL DAO Reviewer** – SQL/DAL performance and schema rules (`.claude/skills/sql-dao/`).
+
+All six reviewers run by default in the current prototype; future iterations may toggle them based on the languages or directories touched in a pull request. Additional skills can be introduced by adding new `.claude/skills/<name>/SKILL.md` directories and wiring prompts in `src/agents.ts`.
