@@ -7,6 +7,16 @@
 - `.github/workflows/airbot.yml` — CI entry point; ensure new automation steps stay Bun-first.
 - `CLAUDE.md` & `README.md` — Contributor-facing rubric and overview; update when behavior or scope shifts.
 
+## Claude Reviewers & Skills
+- **TypeScript Style Reviewer** — TypeScript conventions, null safety, and module hygiene (`.claude/skills/ts-style/`).
+- **Security Reviewer** — Node/TS security checklist (`.claude/skills/security-checklist/`).
+- **Test Reviewer** — Bun testing expectations (`.claude/skills/test-coverage/`).
+- **Backend Architecture Reviewer** — Kotlin service layering, packaging, and DI rules (`.claude/skills/backend-code-organisation/`).
+- **Kotlin Coroutines Reviewer** — Coroutine/threading guardrails for Kotlin backends (`.claude/skills/kotlin-coroutines/`).
+- **SQL DAO Reviewer** — SQL/DAL performance and schema practices (`.claude/skills/sql-dao/`).
+
+The current prototype invokes all six reviewers on every run. Add or disable agents by editing `src/agents.ts`; each reviewer should cite a skill directory and corresponding rubric entries in `CLAUDE.md`.
+
 ## Build, Test, and Development Commands
 - `bun install` — Resolve dependencies declared in `package.json`. Run after any dependency change.
 - `bun run build` — Type-check and emit compiled output to `dist/` using `tsconfig.json`.
