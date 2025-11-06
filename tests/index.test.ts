@@ -6,8 +6,17 @@ import {
   createGitHubClient,
   formatReviewPayload,
   runClaudeOrchestrator,
+  runReview,
 } from "../src/index";
-import type { ReviewSubmission } from "../src/index";
+import type {
+  ReviewSubmission,
+  ReviewContext,
+  OrchestratorRunResult,
+  ClaudeOrchestratorDependencies,
+  GitHubClient,
+  PullRequestIdentifier,
+  PullRequestFile,
+} from "../src/index";
 import type { Finding } from "../src/types";
 import type { ToolRegistry } from "../src/tools";
 import { z } from "zod";
@@ -461,5 +470,203 @@ describe("runClaudeOrchestrator", () => {
     expect(result.findings).toHaveLength(1);
     expect(result.findings[0]?.path).toBe("src/index.ts");
     expect(returnCount).toBe(1);
+  });
+});
+
+describe("runReview", () => {
+  const SAMPLE_DIFF = [
+    "diff --git a/src/example.ts b/src/example.ts",
+    "index 0000000..1111111 100644",
+    "--- a/src/example.ts",
+    "+++ b/src/example.ts",
+    "@@ -0,0 +1,2 @@",
+    "+const answer = 42;",
+    "+",
+    "",
+  ].join("\n");
+
+  function setEnv(overrides: Record<string, string | undefined>): () => void {
+    const previous = new Map<string, string | undefined>();
+    for (const [key, value] of Object.entries(overrides)) {
+      previous.set(key, process.env[key]);
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    return () => {
+      for (const [key, value] of previous.entries()) {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
+    };
+  }
+
+  test("submits a GitHub review when post-review mode is enabled", async () => {
+    const restoreEnv = setEnv({
+      GITHUB_REPOSITORY: "acme/airbot",
+      PR_NUMBER: "42",
+      GITHUB_WORKSPACE: "/repo",
+      GITHUB_TOKEN: "secret-token",
+      AIRBOT_POST_REVIEW: "1",
+      ANTHROPIC_API_KEY: "sk-test",
+    });
+
+    const githubCalls: Array<{
+      identifier: PullRequestIdentifier;
+      review: ReviewSubmission;
+    }> = [];
+
+    const githubClient: GitHubClient = {
+      async getPullRequest() {
+        return { title: "Refactor orchestrator" };
+      },
+      async getPullRequestDiff() {
+        return SAMPLE_DIFF;
+      },
+      async listPullRequestFiles() {
+        return [
+          {
+            filename: "src/example.ts",
+            additions: 2,
+            deletions: 0,
+            status: "modified",
+          } as PullRequestFile,
+        ];
+      },
+      async createReview(identifier, review) {
+        githubCalls.push({ identifier, review });
+      },
+    };
+
+    const discoverPlugins = async (workspace: string) => {
+      expect(workspace).toBe("/repo");
+      return { configs: [], warnings: [] };
+    };
+
+    let orchestratorInvocations = 0;
+
+    const runOrchestrator = async (
+      context: ReviewContext,
+      dependencies?: ClaudeOrchestratorDependencies,
+    ): Promise<OrchestratorRunResult> => {
+      orchestratorInvocations += 1;
+      expect(context.environment.repoSlug).toBe("acme/airbot");
+      expect(context.pullRequest?.files).toHaveLength(1);
+      expect(dependencies?.discoverPlugins).toBe(discoverPlugins);
+      return {
+        findings: [
+          {
+            kind: "line",
+            path: "src/example.ts",
+            line: 7,
+            side: "RIGHT",
+            body: "Prefer const declarations.",
+          },
+        ],
+        durationMs: 25,
+        assistantOutputs: [],
+      };
+    };
+
+    try {
+      await runReview({
+        githubClient,
+        runOrchestrator,
+        discoverPlugins,
+      });
+    } finally {
+      restoreEnv();
+    }
+
+    expect(orchestratorInvocations).toBe(1);
+    expect(githubCalls).toHaveLength(1);
+    const submission = githubCalls[0];
+    expect(submission.identifier).toEqual({
+      owner: "acme",
+      repo: "airbot",
+      pullNumber: 42,
+    });
+    expect(submission.review.comments).toHaveLength(1);
+    expect(submission.review.comments[0]?.path).toBe("src/example.ts");
+    expect(submission.review.comments[0]?.line).toBe(7);
+  });
+
+  test("skips submission and emits dry-run output when post-review is disabled", async () => {
+    const restoreEnv = setEnv({
+      GITHUB_REPOSITORY: "acme/airbot",
+      PR_NUMBER: "5",
+      GITHUB_WORKSPACE: "/repo",
+      ANTHROPIC_API_KEY: "sk-test",
+    });
+
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => {
+      logs.push(args.map((value) => String(value)).join(" "));
+    };
+
+    let createReviewCalled = false;
+    const githubClient: GitHubClient = {
+      async getPullRequest() {
+        return { title: "Enable dry run" };
+      },
+      async getPullRequestDiff() {
+        return SAMPLE_DIFF;
+      },
+      async listPullRequestFiles() {
+        return [
+          {
+            filename: "src/example.ts",
+            additions: 2,
+            deletions: 0,
+            status: "modified",
+          } as PullRequestFile,
+        ];
+      },
+      async createReview() {
+        createReviewCalled = true;
+      },
+    };
+
+    let orchestratorInvocations = 0;
+    const runOrchestrator = async (
+      context: ReviewContext,
+    ): Promise<OrchestratorRunResult> => {
+      orchestratorInvocations += 1;
+      expect(context.pullRequest?.files[0]?.filename).toBe("src/example.ts");
+      return {
+        findings: [
+          {
+            kind: "summary",
+            path: "",
+            body: "Ready to merge.",
+          },
+        ],
+        durationMs: 12,
+        assistantOutputs: ["Summary"],
+        warning: "No inline findings.",
+      };
+    };
+
+    try {
+      await runReview({
+        githubClient,
+        runOrchestrator,
+      });
+    } finally {
+      console.log = originalLog;
+      restoreEnv();
+    }
+
+    expect(orchestratorInvocations).toBe(1);
+    expect(createReviewCalled).toBe(false);
+    expect(
+      logs.some((entry) => entry.includes('"mode": "dry-run"')),
+    ).toBe(true);
   });
 });
