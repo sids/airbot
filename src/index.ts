@@ -10,6 +10,7 @@ import { parseUnifiedDiff } from "./parsing/unifiedDiff.js";
 import { createToolRegistry } from "./tools.js";
 import type { ToolRegistry } from "./tools.js";
 import type { Findings } from "./types.js";
+import { discoverLocalPluginConfigs } from "./plugins.js";
 
 type ReviewEnvironment = {
   workspace: string;
@@ -399,6 +400,12 @@ export async function runClaudeOrchestrator(
         })
       : undefined;
 
+  const pluginDiscovery = await discoverLocalPluginConfigs(
+    context.environment.workspace,
+  );
+  const pluginConfigs = pluginDiscovery.configs;
+  const pluginWarnings = pluginDiscovery.warnings;
+
   let stream: ClaudeQuery | undefined;
 
   try {
@@ -415,6 +422,7 @@ export async function runClaudeOrchestrator(
           ANTHROPIC_API_KEY: context.environment.anthropicApiKey,
         },
         mcpServers,
+        plugins: pluginConfigs.length > 0 ? pluginConfigs : undefined,
         settingSources: ["project"],
       },
     }) as ClaudeQuery;
@@ -434,7 +442,7 @@ export async function runClaudeOrchestrator(
       }
     }
 
-    const warnings: string[] = [];
+    const warnings: string[] = [...pluginWarnings];
 
     if (!resultMessage) {
       warnings.push("Claude orchestration did not produce a result message.");
@@ -500,6 +508,7 @@ export async function runClaudeOrchestrator(
       durationMs: elapsed(),
       error: message,
       assistantOutputs: [],
+      warning: pluginWarnings.length > 0 ? pluginWarnings.join(" ") : undefined,
     };
   } finally {
     await disposeQuery(stream);
@@ -550,7 +559,7 @@ async function callTool(
 }
 
 
-// Prompt structure nudges Claude to issue /agent commands and keeps the response schema stable.
+// Prompt structure nudges Claude to discover skills and synthesize specialized subagents while keeping the response schema stable.
 function buildOrchestratorPrompt(
   context: ReviewContext,
   tools: RegisteredTool[],
@@ -564,11 +573,11 @@ function buildOrchestratorPrompt(
       : environment.repoSlug;
 
   sections.push(
-    "You are AIRBot's autonomous review orchestrator. Coordinate the declarative subagents stored in .claude/agents/ to assess the current pull request.",
+    "You are AIRBot's autonomous review orchestrator. Discover the reviewer skills exposed by the installed Claude plugins and spin up focused subagents that apply each rubric to the pull request.",
   );
 
   sections.push(
-    "Use `/agent <name>` commands to load the subagents you deem relevant. Allow each subagent to consult CLAUDE.md and its linked rubric directory before emitting findings.",
+    "For each domain (TypeScript style, security, tests, backend architecture, Kotlin coroutines, SQL/DAO), load the corresponding skill guidance (CLAUDE.md plus the plugin's skills/*/SKILL.md) and instantiate an ad-hoc subagent that cites the skill while producing findings.",
   );
 
   const metadataNotice = pullRequest
