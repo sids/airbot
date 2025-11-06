@@ -1,0 +1,13 @@
+{
+  "name": "airbot-security",
+  "title": "AIRBot Security Review Skills",
+  "version": "0.1.0",
+  "description": "Security checklist and guidance for AIRBot reviews.",
+  "license": "MIT",
+  "tags": ["airbot", "security"],
+  "contributions": {
+    "skills": [
+      { "path": "skills/security-checklist/SKILL.md" }
+    ]
+  }
+}

@@ -18,6 +18,7 @@ const IGNORED_DIRECTORY_NAMES = new Set([
   "dist",
   ".beads",
   ".claude",
+  ".claude-plugin",
   ".turbo",
 ]);
 

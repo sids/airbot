@@ -1,0 +1,15 @@
+{
+  "name": "airbot-backend",
+  "title": "AIRBot Backend Review Skills",
+  "version": "0.1.0",
+  "description": "Backend architecture, Kotlin coroutines, and SQL/DAO rubrics for AIRBot reviews.",
+  "license": "MIT",
+  "tags": ["airbot", "backend", "kotlin", "sql"],
+  "contributions": {
+    "skills": [
+      { "path": "skills/backend-code-organisation/SKILL.md" },
+      { "path": "skills/kotlin-coroutines/SKILL.md" },
+      { "path": "skills/sql-dao/SKILL.md" }
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "airbot-typescript",
+  "title": "AIRBot TypeScript Review Skills",
+  "version": "0.1.0",
+  "description": "TypeScript style and testing rubrics for AIRBot reviews.",
+  "license": "MIT",
+  "tags": ["airbot", "typescript", "testing"],
+  "contributions": {
+    "skills": [
+      { "path": "skills/ts-style/SKILL.md" },
+      { "path": "skills/test-coverage/SKILL.md" }
+    ]
+  }
+}

@@ -17,8 +17,8 @@ AIRBot (short for **AI Review Bot**) aims to build an automated pull-request rev
 5. **Post or dry-run:** Depending on environment, either output a human-readable report or submit comments directly to the PR.
 
 ## Current Status
-- Bun-powered TypeScript scaffold with placeholder modules (`src/`), tests (`tests/`), skills (`.claude/skills/`), and a GitHub Actions workflow.
-- Reviewer roster includes TypeScript style, security, and test coverage agents, plus Kotlin-oriented backend reviewers (architecture, coroutines, SQL DAO) sourced from `.claude/skills/`.
+- Bun-powered TypeScript scaffold with placeholder modules (`src/`), tests (`tests/`), optional reviewer plugins (`plugins/airbot-typescript`, `plugins/airbot-security`, `plugins/airbot-backend`), and a GitHub Actions workflow.
+- Reviewer roster includes TypeScript style, security, and test coverage agents, plus Kotlin-oriented backend reviewers (architecture, coroutines, SQL DAO) sourced from the bundled plugins.
 - No runtime implementation yet—core logic, prompts, and tooling will be filled in next iterations.
 
 ## Getting Started
@@ -47,11 +47,27 @@ bun run review
 ### Reviewer Roster & Triggering
 
 AIRBot currently ships six Claude reviewers:
-- **TypeScript Style Reviewer** – TypeScript conventions, null safety, module organization (`.claude/skills/ts-style/`).
-- **Security Reviewer** – Node/TS security guardrails (`.claude/skills/security-checklist/`).
-- **Test Reviewer** – Coverage expectations for Bun-based projects (`.claude/skills/test-coverage/`).
-- **Backend Architecture Reviewer** – Kotlin service layering, packaging, and DI guidance (`.claude/skills/backend-code-organisation/`).
-- **Kotlin Coroutines Reviewer** – Coroutine/threading discipline for Kotlin backends (`.claude/skills/kotlin-coroutines/`).
-- **SQL DAO Reviewer** – SQL/DAL performance and schema rules (`.claude/skills/sql-dao/`).
+- **TypeScript Style Reviewer** – TypeScript conventions, null safety, module organization (`plugins/airbot-typescript/skills/ts-style/` or `~/.claude/plugins/airbot-typescript/skills/ts-style/`).
+- **Security Reviewer** – Node/TS security guardrails (`plugins/airbot-security/skills/security-checklist/` or home equivalent).
+- **Test Reviewer** – Coverage expectations for Bun-based projects (`plugins/airbot-typescript/skills/test-coverage/` or home equivalent).
+- **Backend Architecture Reviewer** – Kotlin service layering guidance (`plugins/airbot-backend/skills/backend-code-organisation/` or home equivalent).
+- **Kotlin Coroutines Reviewer** – Coroutine/threading discipline (`plugins/airbot-backend/skills/kotlin-coroutines/` or home equivalent).
+- **SQL DAO Reviewer** – SQL/DAL performance and schema rules (`plugins/airbot-backend/skills/sql-dao/` or home equivalent).
 
-All six reviewers run by default in the current prototype; future iterations may toggle them based on the languages or directories touched in a pull request. Additional reviewers can be introduced by adding new `.claude/agents/<agent-id>.md` manifests that reference the relevant `.claude/skills/<name>/SKILL.md` rubric files.
+All six reviewers run by default in the current prototype; future iterations may toggle them based on the languages or directories touched in a pull request. Additional reviewers can be introduced by extending one of the grouped plugins or adding new Claude Code plugins under `plugins/<id>/` (or in `~/.claude/plugins/<id>/`) with their own `.claude-plugin/plugin.json` manifest.
+
+At runtime AIRBot inspects these skill definitions (CLAUDE.md plus each plugin's `skills/*/SKILL.md`) and spawns temporary subagents that apply the appropriate rubric—no static agent manifests are required.
+
+### Installing The Plugins Via Claude Code
+
+The repository bundles a marketplace manifest at `.claude-plugin/marketplace.json` that advertises all six reviewer plugins. To install them with Claude Code:
+
+```bash
+# From the repository root
+claude /plugin marketplace add airbot ./.claude-plugin/marketplace.json
+claude /plugin install airbot airbot-typescript
+claude /plugin install airbot airbot-security
+claude /plugin install airbot airbot-backend
+```
+
+Installing publishes the plugins into `~/.claude/plugins/`, where the runtime automatically discovers them.

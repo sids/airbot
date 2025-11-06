@@ -1,0 +1,35 @@
+{
+  "name": "airbot-reviewers",
+  "owner": {
+    "name": "AIRBot Team"
+  },
+  "plugins": [
+    {
+      "name": "airbot-typescript",
+      "source": "plugins/airbot-typescript",
+      "description": "TypeScript style and testing rubrics for AIRBot reviews.",
+      "version": "0.1.0",
+      "author": {
+        "name": "AIRBot Maintainers"
+      }
+    },
+    {
+      "name": "airbot-security",
+      "source": "plugins/airbot-security",
+      "description": "Security checklist and guidance for AIRBot reviews.",
+      "version": "0.1.0",
+      "author": {
+        "name": "AIRBot Maintainers"
+      }
+    },
+    {
+      "name": "airbot-backend",
+      "source": "plugins/airbot-backend",
+      "description": "Backend architecture, Kotlin coroutines, and SQL/DAO rubrics for AIRBot reviews.",
+      "version": "0.1.0",
+      "author": {
+        "name": "AIRBot Maintainers"
+      }
+    }
+  ]
+}

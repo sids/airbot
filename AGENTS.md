@@ -3,20 +3,20 @@
 ## Project Structure & Module Organization
 - `src/` — TypeScript source for AIRBot. Core orchestration lives in `src/index.ts`; domain helpers reside in `src/tools.ts`, `src/dedupe.ts`, and `src/parsing/`.
 - `tests/` — Bun test suites; mirror source structure (e.g., `tests/parsing/*.test.ts`) and keep fixtures alongside the specs.
-- `.claude/agents/` — Declarative reviewer manifests (one per agent). Each frontmatter block specifies name, description, tools, and model.
-- `.claude/skills/` — Each skill lives in its own directory (e.g., `.claude/skills/security-checklist/`) with a `SKILL.md` frontmatter file (must declare `name`, `description`, `license`) plus any supporting docs or scripts.
+- Plugins — Reviewer rubrics ship via grouped Claude Code plugins (`plugins/airbot-typescript`, `plugins/airbot-security`, `plugins/airbot-backend`) or their equivalents under `~/.claude/plugins/` when installed globally.
+- Marketplace — `.claude-plugin/marketplace.json` aggregates the packaged plugins so they can be installed with `claude /plugin` commands.
 - `.github/workflows/airbot.yml` — CI entry point; ensure new automation steps stay Bun-first.
 - `CLAUDE.md` & `README.md` — Contributor-facing rubric and overview; update when behavior or scope shifts.
 
 ## Claude Reviewers & Skills
-- **TypeScript Style Reviewer** — TypeScript conventions, null safety, and module hygiene (`.claude/skills/ts-style/`).
-- **Security Reviewer** — Node/TS security checklist (`.claude/skills/security-checklist/`).
-- **Test Reviewer** — Bun testing expectations (`.claude/skills/test-coverage/`).
-- **Backend Architecture Reviewer** — Kotlin service layering, packaging, and DI rules (`.claude/skills/backend-code-organisation/`).
-- **Kotlin Coroutines Reviewer** — Coroutine/threading guardrails for Kotlin backends (`.claude/skills/kotlin-coroutines/`).
-- **SQL DAO Reviewer** — SQL/DAL performance and schema practices (`.claude/skills/sql-dao/`).
+- **TypeScript Style Reviewer** — TypeScript conventions, null safety, and module hygiene (`plugins/airbot-typescript/skills/ts-style/` or home equivalent).
+- **Security Reviewer** — Node/TS security checklist (`plugins/airbot-security/skills/security-checklist/` or home equivalent).
+- **Test Reviewer** — Bun testing expectations (`plugins/airbot-typescript/skills/test-coverage/` or home equivalent).
+- **Backend Architecture Reviewer** — Kotlin service layering, packaging, and DI rules (`plugins/airbot-backend/skills/backend-code-organisation/` or home equivalent).
+- **Kotlin Coroutines Reviewer** — Coroutine/threading guardrails for Kotlin backends (`plugins/airbot-backend/skills/kotlin-coroutines/` or home equivalent).
+- **SQL DAO Reviewer** — SQL/DAL performance and schema practices (`plugins/airbot-backend/skills/sql-dao/` or home equivalent).
 
-The current prototype invokes all six reviewers on every run. Add or disable agents by editing the `.claude/agents/` manifests; each reviewer should cite a skill directory and corresponding rubric entries in `CLAUDE.md`.
+The current prototype invokes all six reviewers on every run. AIRBot synthesizes subagents from these skills at runtime; add or disable reviewers by editing the related plugin skill or removing the plugin directory so the orchestrator no longer discovers it.
 
 ## Build, Test, and Development Commands
 - `bun install` — Resolve dependencies declared in `package.json`. Run after any dependency change.
