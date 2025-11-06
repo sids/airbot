@@ -36,60 +36,64 @@ async function createPlugin(
 }
 
 describe("discoverLocalPluginConfigs", () => {
-  test("collects plugins from home plugin directories", async () => {
+  test("collects plugins from repo and home plugin directories", async () => {
+    const repoRoot = await mkdtemp(path.join(tmpdir(), "airbot-repo-"));
     const homeRoot = await mkdtemp(path.join(tmpdir(), "airbot-home-"));
     const homePluginsBase = path.join(homeRoot, ".claude", "plugins");
     const originalEnvPluginHome = process.env.CLAUDE_PLUGINS_HOME;
     process.env.CLAUDE_PLUGINS_HOME = homePluginsBase;
 
     try {
+      const repoPlugin = await createPlugin(repoRoot, path.join("plugins", "typescript-style-reviewer"));
       const homePlugin = await createPlugin(homeRoot, path.join(".claude", "plugins", "security-reviewer"));
 
-      const result = await discoverLocalPluginConfigs("/tmp/irrelevant");
+      const result = await discoverLocalPluginConfigs(repoRoot);
 
       const discoveredPaths = result.configs.map((config) => config.path).sort();
 
       expect(discoveredPaths).toEqual(
-        [homePlugin].map((pluginPath) => path.resolve(pluginPath)).sort(),
+        [repoPlugin, homePlugin].map((pluginPath) => path.resolve(pluginPath)).sort(),
       );
       expect(result.warnings).toHaveLength(0);
     } finally {
       process.env.CLAUDE_PLUGINS_HOME = originalEnvPluginHome;
       await rm(homeRoot, { recursive: true, force: true });
+      await rm(repoRoot, { recursive: true, force: true });
     }
   });
 
   test("ignores directories missing plugin manifests", async () => {
-    const homeRoot = await mkdtemp(path.join(tmpdir(), "airbot-home-"));
-    const homePluginsBase = path.join(homeRoot, ".claude", "plugins");
-    const originalEnvPluginHome = process.env.CLAUDE_PLUGINS_HOME;
-    process.env.CLAUDE_PLUGINS_HOME = homePluginsBase;
+    const repoRoot = await mkdtemp(path.join(tmpdir(), "airbot-repo-"));
 
-    try {
-      const goodPlugin = await createPlugin(
-        homeRoot,
-        path.join(".claude", "plugins", "good-reviewer"),
-      );
-      await createPluginDir(homeRoot, path.join(".claude", "plugins", "missing-manifest"));
+    const goodPlugin = await createPlugin(
+      repoRoot,
+      path.join("plugins", "good-reviewer"),
+    );
+    await createPluginDir(repoRoot, path.join("plugins", "missing-manifest"));
 
-      const result = await discoverLocalPluginConfigs("/tmp/irrelevant");
+    const result = await discoverLocalPluginConfigs(repoRoot);
 
-      expect(result.configs).toHaveLength(1);
-      expect(result.configs[0]?.path).toBe(path.resolve(goodPlugin));
-      expect(result.warnings).toHaveLength(0);
-    } finally {
-      process.env.CLAUDE_PLUGINS_HOME = originalEnvPluginHome;
-      await rm(homeRoot, { recursive: true, force: true });
-    }
+    expect(result.configs).toHaveLength(1);
+    expect(result.configs[0]?.path).toBe(path.resolve(goodPlugin));
+    expect(result.warnings).toHaveLength(0);
+
+    await rm(repoRoot, { recursive: true, force: true });
   });
 
   test("returns empty results when no plugins are present", async () => {
+    const repoRoot = await mkdtemp(path.join(tmpdir(), "airbot-repo-"));
+    const originalEnvPluginHome = process.env.CLAUDE_PLUGINS_HOME;
+    delete process.env.CLAUDE_PLUGINS_HOME;
+
     try {
-      const result = await discoverLocalPluginConfigs("/tmp/irrelevant");
+      const result = await discoverLocalPluginConfigs(repoRoot);
       expect(result.configs).toHaveLength(0);
       expect(result.warnings).toHaveLength(0);
     } finally {
-      // nothing to cleanup
+      if (originalEnvPluginHome !== undefined) {
+        process.env.CLAUDE_PLUGINS_HOME = originalEnvPluginHome;
+      }
+      await rm(repoRoot, { recursive: true, force: true });
     }
   });
 });

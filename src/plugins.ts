@@ -16,6 +16,9 @@ export async function discoverLocalPluginConfigs(
   const warnings: string[] = [];
   const seen = new Set<string>();
 
+  const repoPluginsDir = path.resolve(repoRoot, "plugins");
+  await collectPluginsUnder(repoPluginsDir, configs, seen, warnings);
+
   const envHomePlugins = process.env.CLAUDE_PLUGINS_HOME;
   if (envHomePlugins && envHomePlugins.trim().length > 0) {
     await collectPluginsUnder(path.resolve(envHomePlugins), configs, seen, warnings);
